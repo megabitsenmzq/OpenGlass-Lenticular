@@ -25,7 +25,7 @@ Download [`lenticular.zip`](https://github.com/megabitsenmzq/OpenGlass-Lenticula
 
 Open the 3D Viewport sidebar (`N`) and switch to the "Lenticular" tab. Choose your target device and fill in calibration data if prompted. 
 
-Looking Glass Go calibration can be auto-detected and filled in automatically. For OpenStage AI C1, you need to enter it manually (you can copy these values by right-clicking in the official app).
+Looking Glass Go calibration can be auto-detected and filled in automatically. For OpenStage AI C1, you need to enter it manually (you can copy these values by right-clicking the official app status bar icon).
 
 Click "Start Live Output" to open the live window, then move it to the device's screen and enter full screen.
 

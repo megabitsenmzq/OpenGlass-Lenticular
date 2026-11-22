@@ -120,53 +120,8 @@ def _persist_store():
             pass
 
 
-def get_preferences(context=None):
-    prefs = getattr(context, "preferences", None) if context is not None else None
-    if prefs is None:
-        prefs = getattr(bpy.context, "preferences", None)
-    if prefs is None:
-        return None
-    addon = prefs.addons.get(__package__)
-    return addon.preferences if addon is not None else None
-
-
-def _sync_store_to_preferences(context=None):
-    _load_store()
-    addon_prefs = get_preferences(context)
-    if addon_prefs is None:
-        return
-    if _store.get("device") in ("GO", "C1") and addon_prefs.device != _store["device"]:
-        addon_prefs.device = _store["device"]
-    if _store.get("go_grid") in VALID_GRIDS and addon_prefs.go_grid != _store["go_grid"]:
-        addon_prefs.go_grid = _store["go_grid"]
-    if isinstance(_store.get("view_interpolation"), bool) and addon_prefs.view_interpolation != _store["view_interpolation"]:
-        addon_prefs.view_interpolation = _store["view_interpolation"]
-    for key in ("GO", "C1"):
-        entry = _store["devices"].get(key)
-        if not entry:
-            continue
-        if key == "GO" and not addon_prefs.go_calibrated:
-            addon_prefs.go_x0 = entry["x0"]
-            addon_prefs.go_interval = entry["interval"]
-            addon_prefs.go_slope = entry["slope"]
-            addon_prefs.go_calibration_source = entry["source"]
-            addon_prefs.go_calibrated = True
-        elif key == "C1" and not addon_prefs.c1_calibrated:
-            addon_prefs.c1_x0 = entry["x0"]
-            addon_prefs.c1_interval = entry["interval"]
-            addon_prefs.c1_slope = entry["slope"]
-            addon_prefs.c1_calibration_source = entry["source"]
-            addon_prefs.c1_calibrated = True
-
-
 def get_saved_calibration(device, context=None):
     _load_store()
-    addon_prefs = get_preferences(context)
-    if addon_prefs is not None:
-        if device == "GO" and addon_prefs.go_calibrated and is_calibration_valid(addon_prefs.go_x0, addon_prefs.go_interval, addon_prefs.go_slope):
-            return True, addon_prefs.go_x0, addon_prefs.go_interval, addon_prefs.go_slope, addon_prefs.go_calibration_source
-        if device == "C1" and addon_prefs.c1_calibrated and is_calibration_valid(addon_prefs.c1_x0, addon_prefs.c1_interval, addon_prefs.c1_slope):
-            return True, addon_prefs.c1_x0, addon_prefs.c1_interval, addon_prefs.c1_slope, addon_prefs.c1_calibration_source
     entry = _store["devices"].get(device)
     if entry and is_calibration_valid(entry["x0"], entry["interval"], entry["slope"]):
         return True, entry["x0"], entry["interval"], entry["slope"], entry["source"]
@@ -191,23 +146,6 @@ def save_device_calibration(device, x0, interval, slope, source="Manual", contex
     if switch_scene_device and device in ("GO", "C1"):
         _store["device"] = device
     _persist_store()
-
-    addon_prefs = get_preferences(context)
-    if addon_prefs is not None:
-        if device == "GO":
-            addon_prefs.go_x0 = x0
-            addon_prefs.go_interval = interval
-            addon_prefs.go_slope = slope
-            addon_prefs.go_calibration_source = source
-            addon_prefs.go_calibrated = valid
-        else:
-            addon_prefs.c1_x0 = x0
-            addon_prefs.c1_interval = interval
-            addon_prefs.c1_slope = slope
-            addon_prefs.c1_calibration_source = source
-            addon_prefs.c1_calibrated = valid
-        if switch_scene_device:
-            addon_prefs.device = device
 
     scene = getattr(context, "scene", None) if context is not None else getattr(bpy.context, "scene", None)
     settings = getattr(scene, "lenticular", None)
@@ -263,31 +201,27 @@ def update_device_calibration(settings, device, context=None):
         _set_scene_calibration_values(settings, 0.0, 0.0, 0.0)
 
 
-def _set_shared_pref(key, value, context=None, sync_prefs=True):
-    """Persist a device-independent setting and mirror it into AddonPreferences."""
+def _set_shared_pref(key, value):
+    """Persist a device-independent setting into the JSON config store."""
     _load_store()
     if _store.get(key) != value:
         _store[key] = value
         _persist_store()
-    if sync_prefs:
-        addon_prefs = get_preferences(context)
-        if addon_prefs is not None and getattr(addon_prefs, key) != value:
-            setattr(addon_prefs, key, value)
 
 
 def device_changed(self, context):
     _load_store()
     update_device_calibration(self, self.device, context)
-    _set_shared_pref("device", self.device, context=context)
+    _set_shared_pref("device", self.device)
 
 
 def grid_changed(self, context):
     if self.go_grid in VALID_GRIDS:
-        _set_shared_pref("go_grid", self.go_grid, context=context)
+        _set_shared_pref("go_grid", self.go_grid)
 
 
 def view_interpolation_changed(self, context):
-    _set_shared_pref("view_interpolation", bool(self.view_interpolation), context=context)
+    _set_shared_pref("view_interpolation", bool(self.view_interpolation))
 
 
 def show_screen_plane_changed(self, context):
@@ -302,10 +236,8 @@ def show_screen_plane_changed(self, context):
 
 def preferred_device():
     _load_store()
-    addon_prefs = get_preferences()
-    if addon_prefs is not None:
-        return addon_prefs.device
-    return _store.get("device", "GO")
+    device = _store.get("device", "GO")
+    return device if device in ("GO", "C1") else "GO"
 
 
 def preferred_grid():
@@ -313,10 +245,7 @@ def preferred_grid():
     grid = _store.get("go_grid")
     if grid in VALID_GRIDS:
         return grid
-    addon_prefs = get_preferences()
-    if addon_prefs is not None and addon_prefs.go_grid in VALID_GRIDS:
-        return addon_prefs.go_grid
-    return "5x9"
+    return DEFAULT_GRID
 
 
 def preferred_view_interpolation():
@@ -324,38 +253,39 @@ def preferred_view_interpolation():
     val = _store.get("view_interpolation")
     if isinstance(val, bool):
         return val
-    addon_prefs = get_preferences()
-    if addon_prefs is not None:
-        return bool(addon_prefs.view_interpolation)
     return True
 
 
 def apply_saved_device(scene=None, preserve_existing=False):
-    _sync_store_to_preferences()
-    if not isinstance(scene, bpy.types.Scene):
-        scene = getattr(bpy.context, "scene", None)
-    if scene is None:
-        return
-    settings = getattr(scene, "lenticular", None)
-    if settings is None:
-        return
-    if not preserve_existing or not settings.is_property_set("go_grid"):
-        target_grid = preferred_grid()
+    _load_store()
+    if isinstance(scene, bpy.types.Scene):
+        scenes = (scene,)
+    else:
+        scenes = tuple(getattr(bpy.data, "scenes", ()) or ())
+        if not scenes:
+            active_scene = getattr(bpy.context, "scene", None)
+            if active_scene is not None:
+                scenes = (active_scene,)
+    target_grid = preferred_grid()
+    target_interp = preferred_view_interpolation()
+    target_device = preferred_device()
+    for target_scene in scenes:
+        settings = getattr(target_scene, "lenticular", None)
+        if settings is None:
+            continue
         if settings.go_grid != target_grid:
             settings.go_grid = target_grid
-    if not preserve_existing or not settings.is_property_set("view_interpolation"):
-        target_interp = preferred_view_interpolation()
         if settings.view_interpolation != target_interp:
             settings.view_interpolation = target_interp
-    if preserve_existing:
-        if not is_scene_calibrated(settings):
+        if preserve_existing and is_scene_calibrated(settings):
+            continue
+        if preserve_existing:
             update_device_calibration(settings, settings.device)
-        return
-    target = preferred_device()
-    if settings.device != target:
-        settings.device = target
-    elif not is_scene_calibrated(settings):
-        update_device_calibration(settings, target)
+            continue
+        if settings.device != target_device:
+            settings.device = target_device
+        elif not is_scene_calibrated(settings):
+            update_device_calibration(settings, target_device)
 
 
 @persistent
@@ -366,109 +296,6 @@ def load_saved_device(filepath=""):
 def restore_saved_device():
     apply_saved_device(preserve_existing=bool(bpy.data.filepath))
     return None
-
-
-def _pref_grid_edited(self, context):
-    if self.go_grid in VALID_GRIDS:
-        _set_shared_pref("go_grid", self.go_grid, context=context, sync_prefs=False)
-
-
-def _pref_view_interpolation_edited(self, context):
-    _set_shared_pref("view_interpolation", bool(self.view_interpolation), context=context, sync_prefs=False)
-
-
-def _pref_device_calibration_edited(prefs, device, prefix):
-    x0 = getattr(prefs, f"{prefix}_x0")
-    interval = getattr(prefs, f"{prefix}_interval")
-    slope = getattr(prefs, f"{prefix}_slope")
-    valid = is_calibration_valid(x0, interval, slope)
-    calibrated_attr = f"{prefix}_calibrated"
-    source_attr = f"{prefix}_calibration_source"
-    if getattr(prefs, calibrated_attr) != valid:
-        setattr(prefs, calibrated_attr, valid)
-    if valid and not getattr(prefs, source_attr):
-        setattr(prefs, source_attr, "Manual")
-    _load_store()
-    if valid:
-        _store["devices"][device] = {
-            "x0": float(x0),
-            "interval": float(interval),
-            "slope": float(slope),
-            "source": getattr(prefs, source_attr) or "Manual",
-        }
-    else:
-        _store["devices"].pop(device, None)
-    _persist_store()
-
-
-def _pref_go_calibration_edited(self, context):
-    _pref_device_calibration_edited(self, "GO", "go")
-
-
-def _pref_c1_calibration_edited(self, context):
-    _pref_device_calibration_edited(self, "C1", "c1")
-
-
-class LenticularPreferences(bpy.types.AddonPreferences):
-    bl_idname = __package__
-    device: bpy.props.EnumProperty(
-        name="Default Output Device",
-        items=DEVICE_ITEMS,
-        default="GO",
-    )
-    go_grid: bpy.props.EnumProperty(
-        name="Default View Grid",
-        items=GRID_ITEMS,
-        default="5x9",
-        update=_pref_grid_edited,
-    )
-    view_interpolation: bpy.props.BoolProperty(
-        name="Smooth View Transitions",
-        default=True,
-        update=_pref_view_interpolation_edited,
-    )
-    go_calibrated: bpy.props.BoolProperty(name="Looking Glass Go Calibrated", default=False)
-    go_x0: bpy.props.FloatProperty(name="Center", default=0.0, precision=6, update=_pref_go_calibration_edited)
-    go_interval: bpy.props.FloatProperty(name="Pitch", default=0.0, min=0.0, precision=6, update=_pref_go_calibration_edited)
-    go_slope: bpy.props.FloatProperty(name="Slope", default=0.0, precision=6, update=_pref_go_calibration_edited)
-    go_calibration_source: bpy.props.StringProperty(name="Calibration Source", default="")
-
-    c1_calibrated: bpy.props.BoolProperty(name="OpenStage AI C1 Calibrated", default=False)
-    c1_x0: bpy.props.FloatProperty(name="X0", default=0.0, precision=6, update=_pref_c1_calibration_edited)
-    c1_interval: bpy.props.FloatProperty(name="Interval", default=0.0, min=0.0, precision=6, update=_pref_c1_calibration_edited)
-    c1_slope: bpy.props.FloatProperty(name="Slope", default=0.0, precision=6, update=_pref_c1_calibration_edited)
-    c1_calibration_source: bpy.props.StringProperty(name="Calibration Source", default="")
-
-    def draw(self, context):
-        layout = self.layout
-        layout.prop(self, "device")
-        layout.prop(self, "go_grid")
-        layout.prop(self, "view_interpolation")
-
-        go_box = layout.box()
-        go_header = go_box.row()
-        go_status = f"Calibrated ({self.go_calibration_source})" if self.go_calibrated else "Not calibrated"
-        go_header.label(text=f"Looking Glass Go: {go_status}")
-        go_actions = go_box.row(align=True)
-        op = go_actions.operator("lenticular.import_calibration", text="Import visual.json / JSON…", icon="FILE_FOLDER")
-        op.target_device = "GO"
-        go_actions.operator("lenticular.autodetect_calibration", text="Auto-Detect visual.json", icon="VIEWZOOM")
-        go_row = go_box.row(align=True)
-        go_row.prop(self, "go_x0")
-        go_row.prop(self, "go_interval")
-        go_row.prop(self, "go_slope")
-
-        c1_box = layout.box()
-        c1_header = c1_box.row()
-        c1_status = f"Calibrated ({self.c1_calibration_source})" if self.c1_calibrated else "Not calibrated"
-        c1_header.label(text=f"OpenStage AI C1: {c1_status}")
-        c1_actions = c1_box.row(align=True)
-        op = c1_actions.operator("lenticular.import_calibration", text="Import Calibration JSON…", icon="FILE_FOLDER")
-        op.target_device = "C1"
-        c1_row = c1_box.row(align=True)
-        c1_row.prop(self, "c1_x0")
-        c1_row.prop(self, "c1_interval")
-        c1_row.prop(self, "c1_slope")
 
 
 class LenticularSettings(bpy.types.PropertyGroup):
@@ -543,7 +370,7 @@ class LenticularSettings(bpy.types.PropertyGroup):
     cycles_progress: bpy.props.IntProperty(default=0, min=0, max=2147483647)
 
 
-classes = (LenticularSettings, LenticularPreferences)
+classes = (LenticularSettings,)
 
 
 def register():
