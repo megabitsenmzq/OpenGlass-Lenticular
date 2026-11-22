@@ -1,0 +1,22 @@
+schema_version = "1.0.0"
+
+id = "lenticular"
+version = "1.0.0"
+name = "Lenticular"
+tagline = "Live lenticular 3D viewport and multiview export"
+maintainer = "Megabits"
+type = "add-on"
+tags = ["3D View", "Render"]
+blender_version_min = "5.2.0"
+website = "https://github.com/megabitsenmzq/OpenGlass-Lenticular"
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Import calibration files and export multiview images/videos"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/assets/",
+  "/.*",
+]
