@@ -43,6 +43,13 @@ configure_anamorphic_camera = _realtime.configure_anamorphic_camera
 encode_video = _video_encoder.encode_video
 
 
+def _write_progress(directory, progress):
+    progress_path = os.path.join(directory, "progress.tmp")
+    with open(progress_path, "w", encoding="ascii") as handle:
+        json.dump(progress, handle)
+    os.replace(progress_path, os.path.join(directory, "progress"))
+
+
 def main():
     global VIEW_WIDTH, VIEW_COLUMNS, VIEW_ROWS, VIEW_COUNT
     with open(sys.argv[sys.argv.index("--") + 1], encoding="utf-8") as handle:
@@ -146,16 +153,15 @@ def main():
                 bpy.data.images.remove(image)
 
             completed_views += 1
-            progress = {
-                "views": completed_views,
-                "frame_index": frame_index + 1,
-                "frame_count": len(frames),
-                "frame": frame,
-            }
-            progress_path = os.path.join(directory, "progress.tmp")
-            with open(progress_path, "w", encoding="ascii") as handle:
-                json.dump(progress, handle)
-            os.replace(progress_path, os.path.join(directory, "progress"))
+            _write_progress(
+                directory,
+                {
+                    "views": completed_views,
+                    "frame_index": frame_index + 1,
+                    "frame_count": len(frames),
+                    "frame": frame,
+                },
+            )
             print(f"Lenticular progress frame {frame_index + 1}/{len(frames)} view {index + 1}/{VIEW_COUNT}", flush=True)
 
         settings = SimpleNamespace(
@@ -170,12 +176,32 @@ def main():
             save_composite(atlas, settings, comp_path, f"Lenticular_Interlaced_{frame_index:06d}", profile=profile)
             interlaced_paths.append(comp_path)
         else:
+            _write_progress(
+                directory,
+                {
+                    "views": completed_views,
+                    "frame_index": frame_index + 1,
+                    "frame_count": len(frames),
+                    "frame": frame,
+                    "stage": "compositing",
+                },
+            )
             tiled_path = atlas_path(config["output"])
             save_atlas(atlas, tiled_path)
             save_quilt_metadata(tiled_path, profile)
             save_composite(atlas, settings, config["output"], "Lenticular_Final_Interlaced", profile=profile)
 
     if animation:
+        _write_progress(
+            directory,
+            {
+                "views": completed_views,
+                "frame_index": len(frames),
+                "frame_count": len(frames),
+                "frame": frames[-1],
+                "stage": "encoding",
+            },
+        )
         encode_video(
             atlas_paths, config["output"], scene.render.fps, scene.render.fps_base, view_height,
             {"x0": config["x0"], "interval": config["interval"], "slope": config["slope"], "view_interpolation": config.get("view_interpolation", True)},

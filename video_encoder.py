@@ -22,6 +22,8 @@ _cycles_render = importlib.import_module(f"{_pkg_name}.cycles_render")
 
 DEVICE_PROFILES = _realtime.DEVICE_PROFILES
 VIEW_HEIGHT = _realtime.VIEW_HEIGHT
+atlas_path = _cycles_render.atlas_path
+save_atlas = _cycles_render.save_atlas
 save_composite = _cycles_render.save_composite
 interlaced_path = _cycles_render.interlaced_path
 save_quilt_metadata = _cycles_render.save_quilt_metadata
@@ -107,13 +109,31 @@ def encode_video(atlas_paths, output, fps, fps_base, view_height=VIEW_HEIGHT, ca
 def main():
     with open(sys.argv[sys.argv.index("--") + 1], encoding="utf-8") as handle:
         config = json.load(handle)
+    device = config.get("device", "GO")
+    profile = config.get("profile", DEVICE_PROFILES[device])
+    if "still_atlas_npy" in config:
+        atlas = np.load(config["still_atlas_npy"], allow_pickle=False)
+        settings = SimpleNamespace(
+            device=device,
+            x0=config["x0"],
+            interval=config["interval"],
+            slope=config["slope"],
+            view_interpolation=config.get("view_interpolation", True),
+            status="",
+        )
+        output = config["output"]
+        tiled_path = atlas_path(output)
+        save_atlas(atlas, tiled_path)
+        save_quilt_metadata(tiled_path, profile)
+        save_composite(atlas, settings, output, "Lenticular_Offscreen_Interlaced", profile=profile)
+        return
     calibration = None
     if "x0" in config:
         calibration = {"x0": config["x0"], "interval": config["interval"], "slope": config["slope"], "view_interpolation": config.get("view_interpolation", True)}
     encode_video(
         config["atlas_paths"], config["output"], config["fps"], config["fps_base"],
         int(config.get("view_height", VIEW_HEIGHT)), calibration,
-        device=config.get("device", "GO"), view_width=config.get("view_width"), profile=config.get("profile"),
+        device=device, view_width=config.get("view_width"), profile=profile,
         interlaced_paths=config.get("interlaced_paths"),
     )
 

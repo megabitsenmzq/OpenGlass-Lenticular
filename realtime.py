@@ -278,14 +278,11 @@ def lenticular_depsgraph_update_post(scene, depsgraph):
     _, _, source_space, _ = _session.resolve_source()
     if source_space is None:
         return
-    if source_space.shading.type != "RENDERED":
-        _session.mark_scene_dirty()
-        return
     for update in depsgraph.updates:
         update_id = update.id
         if isinstance(update_id, (bpy.types.Scene, bpy.types.Collection)) or update_id.name.startswith("Lenticular_Live_Temporary_"):
             continue
-        if update.is_updated_geometry or update.is_updated_transform:
+        if update.is_updated_geometry or update.is_updated_transform or update.is_updated_shading:
             _session.mark_scene_dirty()
             return
         if not isinstance(update_id, (bpy.types.Object, bpy.types.Camera, bpy.types.Light)):
@@ -708,7 +705,9 @@ class RealtimeSession:
                 remaining = delay - (now - self.debounce_started)
                 if remaining > 0.0:
                     mode_name = "Material Preview" if source_space.shading.type == "MATERIAL" else "Rendered"
-                    settings.status = f"Stereo {mode_name} | Refresh in {remaining:.1f} s"
+                    countdown_status = f"Stereo {mode_name} | Refresh in {remaining:.1f} s"
+                    if settings.status != countdown_status:
+                        settings.status = countdown_status
                     return
             self.rendering = True
             try:
@@ -1119,7 +1118,7 @@ def stop_realtime_on_load(_filepath=""):
 class Lenticular_OT_start_realtime(bpy.types.Operator):
     bl_idname = "lenticular.start_realtime"
     bl_label = "Start Live Output"
-    bl_description = "Create a separate render window. Move it to the target device and enter full screen"
+    bl_description = "Open a live output window to display full screen on the target device"
 
     def execute(self, context):
         global _session
@@ -1171,7 +1170,7 @@ class Lenticular_OT_start_realtime(bpy.types.Operator):
 class Lenticular_OT_render_stereo_once(bpy.types.Operator):
     bl_idname = "lenticular.render_stereo_once"
     bl_label = "Render Current Stereo Frame"
-    bl_description = "Ignore the delay and immediately render the current two-view stereo pair, cancelling any unfinished task"
+    bl_description = "Immediately render the current stereo pair without waiting for the delay"
 
     def execute(self, context):
         if _session is None:
@@ -1185,7 +1184,7 @@ class Lenticular_OT_render_stereo_once(bpy.types.Operator):
 class Lenticular_OT_render_once(bpy.types.Operator):
     bl_idname = "lenticular.render_once"
     bl_label = "Render Full Current Frame"
-    bl_description = "Render all device views in stages. Scene or view changes automatically cancel unfinished tasks"
+    bl_description = "Render all views for the current frame; scene or view changes cancel the job"
 
     def execute(self, context):
         global _session
@@ -1200,7 +1199,7 @@ class Lenticular_OT_render_once(bpy.types.Operator):
 class Lenticular_OT_pause_realtime(bpy.types.Operator):
     bl_idname = "lenticular.pause_realtime"
     bl_label = "Pause/Resume Live Output"
-    bl_description = "Pausing keeps the output window and current image but stops automatic rendering. Manual stereo and full-frame rendering remain available"
+    bl_description = "Pause or resume automatic live updates while keeping the current output image"
 
     def execute(self, context):
         if _session is None:

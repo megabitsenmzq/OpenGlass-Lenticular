@@ -224,7 +224,7 @@ def view_interpolation_changed(self, context):
     _set_shared_pref("view_interpolation", bool(self.view_interpolation))
 
 
-def show_screen_plane_changed(self, context):
+def tag_redraw_view3d(self=None, context=None):
     wm = getattr(bpy.context, "window_manager", None)
     if wm is None:
         return
@@ -232,6 +232,10 @@ def show_screen_plane_changed(self, context):
         for area in window.screen.areas:
             if area.type == "VIEW_3D":
                 area.tag_redraw()
+
+
+def show_screen_plane_changed(self, context):
+    tag_redraw_view3d(self, context)
 
 
 def preferred_device():
@@ -316,7 +320,7 @@ class LenticularSettings(bpy.types.PropertyGroup):
     slope: bpy.props.FloatProperty(name="Slope", default=0.0, precision=6, update=calibration_value_changed)
     material_debounce: bpy.props.FloatProperty(
         name="Live Render Delay",
-        description="Refresh the stereo pair after the view or scene has been unchanged for this many seconds. Set to 0 to disable the delay; full-frame rendering is unaffected",
+        description="Seconds to wait after moving the view or editing the scene before refreshing (0 to disable)",
         default=0.3,
         min=0.0,
         max=60.0,
@@ -325,7 +329,7 @@ class LenticularSettings(bpy.types.PropertyGroup):
     )
     rendered_debounce: bpy.props.FloatProperty(
         name="Live Render Delay",
-        description="Refresh the stereo pair after the view or scene has been unchanged for this many seconds. Set to 0 to disable the delay; full-frame rendering is unaffected",
+        description="Seconds to wait after moving the view or editing the scene before refreshing (0 to disable)",
         default=10.0,
         min=0.0,
         max=60.0,
@@ -342,32 +346,32 @@ class LenticularSettings(bpy.types.PropertyGroup):
     )
     compensation_x: bpy.props.IntProperty(
         name="X Compensation (px)",
-        description="Pixels added to each tile's width; negative values reduce it. The final width is at least 1 pixel",
+        description="Pixel offset added to each view's width",
         default=0,
         min=-719,
         max=512,
     )
     compensation_y: bpy.props.IntProperty(
         name="Y Compensation (px)",
-        description="Pixels added to each tile's height; negative values reduce it. The final height is at least 1 pixel",
+        description="Pixel offset added to each view's height",
         default=0,
         min=-681,
         max=512,
     )
     view_interpolation: bpy.props.BoolProperty(
         name="Smooth View Transitions",
-        description="Blend adjacent views for smoother motion when enabled. When disabled, show the nearest view directly for sharper out-of-focus details",
+        description="Blend adjacent views for smoother motion; disable for sharper nearest-view details",
         default=True,
         update=view_interpolation_changed,
     )
     show_screen_plane: bpy.props.BoolProperty(
         name="Show Screen Plane",
-        description="Draw a translucent light-blue glass plane at the zero-parallax screen plane in the editing 3D viewport while Live Output is running so everything behind the screen plane (distance > screen plane) is tinted light blue",
+        description="Show a translucent blue screen plane in the 3D viewport; everything behind it appears inside the screen",
         default=True,
         update=show_screen_plane_changed,
     )
-    status: bpy.props.StringProperty(default="Not started")
-    cycles_progress: bpy.props.IntProperty(default=0, min=0, max=2147483647)
+    status: bpy.props.StringProperty(default="Not started", update=tag_redraw_view3d)
+    cycles_progress: bpy.props.IntProperty(default=0, min=0, max=2147483647, update=tag_redraw_view3d)
 
 
 classes = (LenticularSettings,)

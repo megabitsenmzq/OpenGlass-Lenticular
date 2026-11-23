@@ -219,7 +219,7 @@ class Lenticular_OT_import_calibration(bpy.types.Operator, ImportHelper):
 class Lenticular_OT_autodetect_calibration(bpy.types.Operator):
     bl_idname = "lenticular.autodetect_calibration"
     bl_label = "Auto-Detect visual.json"
-    bl_description = "Scan mounted Looking Glass Go volumes, SD cards, and LKG_CALIBRATION for visual.json"
+    bl_description = "Scan mounted drives and LKG_CALIBRATION for Looking Glass Go visual.json"
 
     def execute(self, context):
         result = auto_import_go_calibration(context=context)

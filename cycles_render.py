@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import traceback
 
 import bpy
@@ -25,6 +26,16 @@ def is_cycles_active():
 
 def active_total_views():
     return _active.total_views if _active is not None else 0
+
+
+def active_progress_info():
+    if _active is None:
+        return 0, ""
+    total_steps = getattr(_active, "total_steps", _active.total_views)
+    label = getattr(_active, "progress_label", "")
+    if label:
+        return total_steps, f"{total_steps}/{total_steps} {label}"
+    return total_steps, f"{_active.settings.cycles_progress}/{total_steps} views"
 
 
 def cancel_active():
@@ -99,6 +110,8 @@ def default_filepath(default_filename, context):
 
 
 def save_png(pixels, width, height, filepath, image_name):
+    if pixels.dtype == np.uint8:
+        pixels = pixels.astype(np.float32) / 255.0
     image = bpy.data.images.new(image_name, width=width, height=height, alpha=True)
     try:
         image.pixels.foreach_set(pixels.ravel())
@@ -141,7 +154,7 @@ def save_quilt_metadata(filepath, profile, movie=False, duration=10.0):
 
 
 def save_composite(atlas, settings, filepath, image_name, profile=None):
-    settings.status = "Compositing 1440×2560 interlaced image"
+    settings.status = "Compositing interlaced image"
     device = device_for(settings)
     profile = profile or realtime.profile_for(settings)
     view_count = profile["count"]
@@ -169,8 +182,17 @@ def save_composite(atlas, settings, filepath, image_name, profile=None):
         source_x1 = tile_col * view_width + x1[None, :]
         source_y0 = tile_row * view_height + y0[:, None]
         source_y1 = tile_row * view_height + y1[:, None]
-        top = atlas[source_y0, source_x0, channel] * (1.0 - wx) + atlas[source_y0, source_x1, channel] * wx
-        bottom = atlas[source_y1, source_x0, channel] * (1.0 - wx) + atlas[source_y1, source_x1, channel] * wx
+        p00 = atlas[source_y0, source_x0, channel]
+        p01 = atlas[source_y0, source_x1, channel]
+        p10 = atlas[source_y1, source_x0, channel]
+        p11 = atlas[source_y1, source_x1, channel]
+        if atlas.dtype == np.uint8:
+            p00 = p00.astype(np.float32) / 255.0
+            p01 = p01.astype(np.float32) / 255.0
+            p10 = p10.astype(np.float32) / 255.0
+            p11 = p11.astype(np.float32) / 255.0
+        top = p00 * (1.0 - wx) + p01 * wx
+        bottom = p10 * (1.0 - wx) + p11 * wx
         return top * (1.0 - wy) + bottom * wy
 
     if device == "GO":
@@ -205,7 +227,7 @@ def save_composite(atlas, settings, filepath, image_name, profile=None):
     save_png(output, 1440, 2560, filepath, image_name)
 
 
-def open_preview(filepath):
+def open_preview(filepath, source_window=None):
     image = bpy.data.images.load(filepath, check_existing=True)
     image.reload()
     for window in bpy.context.window_manager.windows:
@@ -214,7 +236,11 @@ def open_preview(filepath):
                 area.tag_redraw()
                 return
     before = {window.as_pointer() for window in bpy.context.window_manager.windows}
-    bpy.ops.wm.window_new()
+    if source_window is not None:
+        with bpy.context.temp_override(window=source_window):
+            bpy.ops.wm.window_new()
+    else:
+        bpy.ops.wm.window_new()
     window = next((w for w in bpy.context.window_manager.windows if w.as_pointer() not in before), None)
     if window is None:
         raise RuntimeError("Could not create the preview window")
@@ -228,6 +254,31 @@ def open_preview(filepath):
         with bpy.context.temp_override(window=window, area=area, region=region):
             bpy.ops.image.view_zoom_ratio(ratio=1.0)
     area.tag_redraw()
+
+
+def open_video_preview(filepath, scene, source_window=None):
+    render = scene.render
+    prev_filepath = render.filepath
+    prev_media_type = render.image_settings.media_type
+    prev_file_format = render.image_settings.file_format
+    prev_ffmpeg_format = render.ffmpeg.format
+    try:
+        render.filepath = filepath
+        render.image_settings.media_type = "VIDEO"
+        render.image_settings.file_format = "FFMPEG"
+        render.ffmpeg.format = "MPEG4"
+        override = {"scene": scene}
+        if source_window is not None:
+            override["window"] = source_window
+        with bpy.context.temp_override(**override):
+            bpy.ops.render.play_rendered_anim()
+    except Exception as exc:
+        print("Lenticular video preview error:", repr(exc))
+    finally:
+        render.filepath = prev_filepath
+        render.image_settings.media_type = prev_media_type
+        render.image_settings.file_format = prev_file_format
+        render.ffmpeg.format = prev_ffmpeg_format
 
 
 class LenticularBaseExportMixin(ExportHelper):
@@ -282,6 +333,9 @@ class LenticularBaseExportMixin(ExportHelper):
         self.view_width, self.view_height = view_dimensions_for(self.settings)
         self.index = 0
         self.total_views = len(frames) * self.view_count if self.animation else self.view_count
+        self.total_steps = self.total_views + 1
+        self.progress_label = ""
+        self.progress_stage = None
         self.frames = frames
         self.frames_directory = os.path.splitext(self.filepath)[0] + "_frames" if self.animation else None
         self.interlaced_frames_directory = interlaced_frames_dir(self.filepath) if self.animation else None
@@ -349,6 +403,7 @@ class LenticularBaseExportMixin(ExportHelper):
                     self.settings.status = "Cancelled"
                 except (AttributeError, ReferenceError):
                     pass
+            properties.tag_redraw_view3d()
 
 
 class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
@@ -371,20 +426,22 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
         self.frame_position = 0
         self.atlas_paths = []
         self.interlaced_paths = []
-        self.encoding = False
+        self.background_mode = None
+        self._next_render_at = 0.0
+        prefix = "lenticular_video_" if self.animation else "lenticular_offscreen_"
+        self.temp_dir = tempfile.TemporaryDirectory(prefix=prefix)
+        self.log_path = os.path.join(self.temp_dir.name, "worker.log")
         if self.animation:
             os.makedirs(self.frames_directory, exist_ok=True)
             os.makedirs(self.interlaced_frames_directory, exist_ok=True)
-            self.temp_dir = tempfile.TemporaryDirectory(prefix="lenticular_video_")
-            self.log_path = os.path.join(self.temp_dir.name, "encoder.log")
         self.offscreen = gpu.types.GPUOffScreen(self.view_width, self.view_height, format="RGBA8")
-        self.atlas_np = np.zeros((self.profile["rows"] * self.view_height, self.profile["columns"] * self.view_width, 4), dtype=np.float32)
+        self.atlas_np = np.zeros((self.profile["rows"] * self.view_height, self.profile["columns"] * self.view_width, 4), dtype=np.uint8)
         _active = self
         self.settings.cycles_progress = 0
         self.settings.status = f"Viewport render: {self.view_count} views, 0/{self.total_views}"
         try:
             self.saved_shading = suspend_rendered_viewports()
-            self.timer = context.window_manager.event_timer_add(0.05 if self.animation else 0.2, window=context.window)
+            self.timer = context.window_manager.event_timer_add(0.05, window=context.window)
             context.window_manager.modal_handler_add(self)
         except Exception:
             self.finish()
@@ -402,26 +459,41 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
         if event.type != "TIMER":
             return {"RUNNING_MODAL"}
         try:
-            if self.encoding:
+            if self.background_mode is not None:
                 if self.process.poll() is None:
                     return {"RUNNING_MODAL"}
                 if self.process.returncode != 0:
-                    raise RuntimeError("Background video encoding failed:\n" + self.worker_log())
-                output_paths = [self.filepath, interlaced_path(self.filepath)]
+                    raise RuntimeError("Background export worker failed:\n" + self.worker_log())
+                if self.background_mode == "VIDEO":
+                    output_paths = [self.filepath, interlaced_path(self.filepath)]
+                    missing = [path for path in output_paths if not os.path.isfile(path)]
+                    if missing:
+                        raise RuntimeError("Background video encoding did not generate output files: " + ", ".join(missing) + "\n" + self.worker_log())
+                    self.finish()
+                    open_video_preview(interlaced_path(self.filepath), self.scene, source_window=self.window)
+                    self.settings.status = (
+                        f"Exported video: {self.filepath}; interlaced: {interlaced_path(self.filepath)}; "
+                        f"frame atlases: {self.frames_directory}"
+                    )
+                    self.report({"INFO"}, f"Exported viewport animation video: {self.filepath}")
+                    return {"FINISHED"}
+                tiled_path = atlas_path(self.filepath)
+                output_paths = [self.filepath, tiled_path]
                 missing = [path for path in output_paths if not os.path.isfile(path)]
                 if missing:
-                    raise RuntimeError("Background video encoding did not generate output files: " + ", ".join(missing) + "\n" + self.worker_log())
+                    raise RuntimeError("Background image saving did not generate output files: " + ", ".join(missing) + "\n" + self.worker_log())
                 self.finish()
-                self.settings.status = (
-                    f"Exported video: {self.filepath}; interlaced: {interlaced_path(self.filepath)}; "
-                    f"frame atlases: {self.frames_directory}"
-                )
-                self.report({"INFO"}, f"Exported viewport animation video: {self.filepath}")
+                open_preview(self.filepath, source_window=self.window)
+                self.settings.status = f"Exported: {self.filepath}; atlas: {tiled_path}"
+                self.report({"INFO"}, f"Exported interlaced image and {self.view_count}-view atlas: {tiled_path}")
                 return {"FINISHED"}
             if self.index < self.view_count:
+                if time.monotonic() < self._next_render_at:
+                    return {"RUNNING_MODAL"}
                 if self.animation and self.index == 0:
                     self.scene.frame_set(self.frames[self.frame_position])
                 self.render_current_view()
+                self._next_render_at = time.monotonic() + 0.01
                 return {"RUNNING_MODAL"}
             if self.animation:
                 path = os.path.join(self.frames_directory, f"frame_{self.frame_position:06d}.png")
@@ -437,18 +509,12 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
                 if self.frame_position < len(self.frames):
                     self.index = 0
                     self.atlas_np.fill(0)
+                    self._next_render_at = time.monotonic() + 0.01
                     return {"RUNNING_MODAL"}
                 self.start_encoding()
                 return {"RUNNING_MODAL"}
-            save_composite(self.atlas_np, self.settings, self.filepath, "Lenticular_Offscreen_Interlaced", profile=self.profile)
-            tiled_path = atlas_path(self.filepath)
-            save_atlas(self.atlas_np, tiled_path)
-            save_quilt_metadata(tiled_path, self.profile)
-            self.finish()
-            open_preview(self.filepath)
-            self.settings.status = f"Exported: {self.filepath}; atlas: {tiled_path}"
-            self.report({"INFO"}, f"Exported interlaced image and {self.view_count}-view atlas: {tiled_path}")
-            return {"FINISHED"}
+            self.start_still_save()
+            return {"RUNNING_MODAL"}
         except Exception as exc:
             self.finish()
             self.settings.status = f"Viewport export failed: {exc}"
@@ -457,9 +523,37 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
             traceback.print_exc()
             return {"CANCELLED"}
 
+    def start_still_save(self):
+        self.background_mode = "STILL"
+        self.progress_label = "Compositing interlaced image…"
+        self.settings.status = f"Viewport rendering of {self.view_count} views complete; saving interlaced image and atlas"
+        atlas_npy_path = os.path.join(self.temp_dir.name, "atlas.npy")
+        np.save(atlas_npy_path, self.atlas_np, allow_pickle=False)
+        self.atlas_np = None
+        config_path = os.path.join(self.temp_dir.name, "encoder.json")
+        with open(config_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "still_atlas_npy": atlas_npy_path,
+                "output": self.filepath,
+                "device": self.device,
+                "profile": self.profile,
+                "x0": self.settings.x0,
+                "interval": self.settings.interval,
+                "slope": self.settings.slope,
+                "view_interpolation": self.settings.view_interpolation,
+            }, handle)
+        worker_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "video_encoder.py")
+        with open(self.log_path, "w", encoding="utf-8") as log:
+            self.process = subprocess.Popen(
+                [bpy.app.binary_path, "--background", "--factory-startup", "--python-exit-code", "1", "--python", worker_path, "--", config_path],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+
     def start_encoding(self):
-        self.encoding = True
-        self.settings.status = f"Viewport rendering of {self.view_count} views complete; encoding {len(self.atlas_paths)} MP4 frames in the background"
+        self.background_mode = "VIDEO"
+        self.progress_label = "Encoding MP4 video…"
+        self.settings.status = f"Viewport rendering of {self.view_count} views complete; encoding {len(self.atlas_paths)} MP4 frames"
         config_path = os.path.join(self.temp_dir.name, "encoder.json")
         with open(config_path, "w", encoding="utf-8") as handle:
             json.dump({
@@ -510,7 +604,7 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
         # draw_view3d(do_color_management=True) already outputs display-referred sRGB values.
         # save_png writes them unchanged using the default sRGB colorspace; do not apply gamma conversion here,
         # otherwise this path would disagree with live preview, final export, and video encoding (sRGB sequencer).
-        arr = np.frombuffer(buf, dtype=np.uint8).reshape(self.view_height, self.view_width, 4).astype(np.float32) / 255.0
+        arr = np.frombuffer(buf, dtype=np.uint8).reshape(self.view_height, self.view_width, 4)
         column = self.index % self.profile["columns"]
         row = self.index // self.profile["columns"] if self.device == "GO" else self.profile["rows"] - 1 - self.index // self.profile["columns"]
         self.atlas_np[row * self.view_height:(row + 1) * self.view_height, column * self.view_width:(column + 1) * self.view_width] = arr
@@ -535,6 +629,7 @@ class LenticularFinalExportMixin(LenticularBaseExportMixin):
         if frames is None:
             return {"CANCELLED"}
         self.engine = self.scene.render.engine
+        self.window = context.window
         self.temp_dir = tempfile.TemporaryDirectory(prefix="lenticular_final_")
         self.log_path = os.path.join(self.temp_dir.name, "worker.log")
         _active = self
@@ -634,13 +729,14 @@ class LenticularFinalExportMixin(LenticularBaseExportMixin):
                 raise RuntimeError("Background rendering did not generate output files: " + ", ".join(missing) + "\n" + self.worker_log())
             self.finish()
             if self.animation:
+                open_video_preview(interlaced_path(self.filepath), self.scene, source_window=self.window)
                 self.settings.status = (
                     f"Exported video: {self.filepath}; interlaced: {interlaced_path(self.filepath)}; "
                     f"frame atlases: {tiled_path}"
                 )
                 self.report({"INFO"}, f"Exported {self.view_count}-view animation video: {self.filepath}")
             else:
-                open_preview(self.filepath)
+                open_preview(self.filepath, source_window=self.window)
                 self.settings.status = f"Exported: {self.filepath}; atlas: {tiled_path}"
                 self.report({"INFO"}, f"Exported interlaced image and {self.view_count}-view atlas: {tiled_path}")
             return {"FINISHED"}
@@ -660,22 +756,32 @@ class LenticularFinalExportMixin(LenticularBaseExportMixin):
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             return
         index = min(index, self.total_views)
-        if index != self.index:
+        stage = progress.get("stage")
+        if index != self.index or stage != self.progress_stage:
             self.index = index
+            self.progress_stage = stage
             self.settings.cycles_progress = index
-            if self.animation:
+            if stage == "compositing":
+                self.progress_label = "Compositing interlaced image…"
+                self.settings.status = "Compositing interlaced image…"
+            elif stage == "encoding":
+                self.progress_label = "Encoding MP4 video…"
+                self.settings.status = "Encoding MP4 video…"
+            elif self.animation:
+                self.progress_label = ""
                 self.settings.status = (
                     f"Background animation render {self.engine} frame {progress['frame_index']}/{progress['frame_count']} "
                     f"(scene frame {progress['frame']}) | View {index}/{self.total_views}"
                 )
             else:
+                self.progress_label = ""
                 self.settings.status = f"Background final render {self.engine} {index}/{self.total_views}"
 
 
 class Lenticular_OT_offscreen_export(LenticularOffscreenExportMixin, bpy.types.Operator):
     bl_idname = "lenticular.offscreen_export"
     bl_label = "Render Viewport (All Views)"
-    bl_description = "Render all device views using the current viewport shading and composite a 1440×2560 interlaced PNG"
+    bl_description = "Render all views from the viewport and export an interlaced PNG and atlas"
     filename_ext = ".png"
     filter_glob: bpy.props.StringProperty(default="*.png", options={"HIDDEN"})
 
@@ -683,7 +789,7 @@ class Lenticular_OT_offscreen_export(LenticularOffscreenExportMixin, bpy.types.O
 class Lenticular_OT_offscreen_animation_export(LenticularOffscreenExportMixin, bpy.types.Operator):
     bl_idname = "lenticular.offscreen_animation_export"
     bl_label = "Render Viewport Animation (All Views per Frame)"
-    bl_description = "Render all device views frame by frame using the current viewport shading, encode MP4 in the background, and retain the atlas frame sequence"
+    bl_description = "Render all views per frame from the viewport and export an MP4 animation"
     filename_ext = ".mp4"
     filter_glob: bpy.props.StringProperty(default="*.mp4", options={"HIDDEN"})
     animation = True
@@ -694,7 +800,7 @@ class Lenticular_OT_offscreen_animation_export(LenticularOffscreenExportMixin, b
 class Lenticular_OT_final_export(LenticularFinalExportMixin, bpy.types.Operator):
     bl_idname = "lenticular.final_export"
     bl_label = "Render Final Image (All Views)"
-    bl_description = "Use the file's current render engine and settings to generate all device views and composite an interlaced PNG"
+    bl_description = "Render all views with the active render engine and export an interlaced PNG and atlas"
     filename_ext = ".png"
     filter_glob: bpy.props.StringProperty(default="*.png", options={"HIDDEN"})
 
@@ -702,7 +808,7 @@ class Lenticular_OT_final_export(LenticularFinalExportMixin, bpy.types.Operator)
 class Lenticular_OT_animation_export(LenticularFinalExportMixin, bpy.types.Operator):
     bl_idname = "lenticular.animation_export"
     bl_label = "Render Final Animation (All Views per Frame)"
-    bl_description = "Render all device views frame by frame, exporting an atlas frame sequence and an MP4 playable in Viewer"
+    bl_description = "Render all views per frame with the active render engine and export an MP4 animation"
     filename_ext = ".mp4"
     filter_glob: bpy.props.StringProperty(default="*.mp4", options={"HIDDEN"})
     animation = True

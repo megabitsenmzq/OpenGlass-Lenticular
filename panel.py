@@ -94,13 +94,13 @@ class LENTICULAR_PT_render_output(bpy.types.Panel):
         column.operator("lenticular.animation_export", text=f"Render Final Animation ({view_count} views/frame)", icon="RENDER_ANIMATION")
 
         if cycles_render.is_cycles_active():
-            total_views = cycles_render.active_total_views()
-            if total_views > 0 and hasattr(layout, "progress"):
-                progress = min(max(settings.cycles_progress / total_views, 0.0), 1.0)
+            total_steps, progress_text = cycles_render.active_progress_info()
+            if total_steps > 0 and hasattr(layout, "progress"):
+                progress = min(max(settings.cycles_progress / total_steps, 0.0), 1.0)
                 layout.progress(
                     factor=progress,
                     type="BAR",
-                    text=f"{settings.cycles_progress}/{total_views} views",
+                    text=progress_text,
                 )
             layout.label(text="Press Esc to cancel rendering", icon="INFO")
 

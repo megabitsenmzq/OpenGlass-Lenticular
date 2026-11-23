@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Lenticular",
     "author": "Megabits",
-    "version": (1, 0, 0),
+    "version": (1, 0, 1),
     "blender": (5, 2, 0),
     "location": "3D View > Sidebar > Lenticular",
     "description": "Live lenticular 3D viewport and multiview export",
