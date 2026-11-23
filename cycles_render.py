@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import time
 import traceback
+from types import SimpleNamespace
 
 import bpy
 import gpu
@@ -422,6 +423,10 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
         self.window = context.window
         self.region = region
         self.region_3d = context.space_data.region_3d
+        self.region_3d.update()
+        self.cached_camera_mode = self.region_3d.view_perspective == "CAMERA" and self.scene.camera is not None
+        self.cached_view_location = self.region_3d.view_location.copy()
+        self.cached_poses = self._build_poses(self.region_3d)
         self.completed_views = 0
         self.frame_position = 0
         self.atlas_paths = []
@@ -492,6 +497,12 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
                     return {"RUNNING_MODAL"}
                 if self.animation and self.index == 0:
                     self.scene.frame_set(self.frames[self.frame_position])
+                    if self.cached_camera_mode:
+                        camera_region = SimpleNamespace(
+                            view_perspective="CAMERA",
+                            view_location=self.cached_view_location,
+                        )
+                        self.cached_poses = self._build_poses(camera_region)
                 self.render_current_view()
                 self._next_render_at = time.monotonic() + 0.01
                 return {"RUNNING_MODAL"}
@@ -579,9 +590,11 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
                 stderr=subprocess.STDOUT,
             )
 
+    def _build_poses(self, region_3d):
+        return [view_pose(region_3d, index, self.scene, self.device, self.view_count) for index in range(self.view_count)]
+
     def render_current_view(self):
-        self.region_3d.update()
-        view_matrix, projection = view_pose(self.region_3d, self.index, self.scene, self.device, self.view_count)
+        view_matrix, projection = self.cached_poses[self.index]
         realtime._offscreen_draw_depth += 1
         try:
             with bpy.context.temp_override(window=self.window, area=self.area, region=self.region):
@@ -599,7 +612,6 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
                     )
         finally:
             realtime._offscreen_draw_depth -= 1
-            self.region_3d.update()
         buf = self.offscreen.texture_color.read()
         # draw_view3d(do_color_management=True) already outputs display-referred sRGB values.
         # save_png writes them unchanged using the default sRGB colorspace; do not apply gamma conversion here,
