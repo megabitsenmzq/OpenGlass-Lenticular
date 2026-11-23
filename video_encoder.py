@@ -68,9 +68,44 @@ def encode_sequence(frame_paths, output, fps, fps_base, width, height, scene_nam
         bpy.data.scenes.remove(encoding_scene)
 
 
-def encode_video(atlas_paths, output, fps, fps_base, view_height=VIEW_HEIGHT, calibration=None, device="GO", view_width=None, profile=None, interlaced_paths=None):
+def _calibration_settings(device, calibration):
+    return SimpleNamespace(
+        device=device,
+        x0=calibration["x0"],
+        interval=calibration["interval"],
+        slope=calibration["slope"],
+        view_interpolation=calibration.get("view_interpolation", True),
+        status="",
+    )
+
+
+def encode_video(
+    atlas_paths, output, fps, fps_base, view_height=VIEW_HEIGHT, calibration=None,
+    device="GO", view_width=None, profile=None, interlaced_paths=None, atlas_npy_paths=None,
+):
     profile = profile or DEVICE_PROFILES[device]
     view_width = view_width or profile["width"]
+    settings = _calibration_settings(device, calibration) if calibration else None
+    if atlas_npy_paths and len(atlas_npy_paths) == len(atlas_paths):
+        if settings is not None and (not interlaced_paths or len(interlaced_paths) != len(atlas_paths)):
+            frames_directory = os.path.splitext(output)[0] + "_interlaced_frames"
+            os.makedirs(frames_directory, exist_ok=True)
+            interlaced_paths = [
+                os.path.join(frames_directory, f"frame_{index:06d}.png")
+                for index in range(len(atlas_paths))
+            ]
+        for index, (npy_path, atlas_png_path) in enumerate(zip(atlas_npy_paths, atlas_paths)):
+            atlas = np.load(npy_path, allow_pickle=False)
+            atlas_dir = os.path.dirname(atlas_png_path)
+            if atlas_dir:
+                os.makedirs(atlas_dir, exist_ok=True)
+            save_atlas(atlas, atlas_png_path)
+            if settings is not None:
+                comp_path = interlaced_paths[index]
+                comp_dir = os.path.dirname(comp_path)
+                if comp_dir:
+                    os.makedirs(comp_dir, exist_ok=True)
+                save_composite(atlas, settings, comp_path, f"Lenticular_Interlaced_{index:06d}", profile=profile)
     encode_sequence(
         atlas_paths, output, fps, fps_base,
         profile["columns"] * view_width, profile["rows"] * view_height, "Lenticular_Video_Encoder",
@@ -84,10 +119,6 @@ def encode_video(atlas_paths, output, fps, fps_base, view_height=VIEW_HEIGHT, ca
     if interlaced_paths and len(interlaced_paths) == len(atlas_paths) and all(os.path.isfile(p) for p in interlaced_paths):
         paths = interlaced_paths
     else:
-        settings = SimpleNamespace(
-            device=device, x0=calibration["x0"], interval=calibration["interval"], slope=calibration["slope"],
-            view_interpolation=calibration.get("view_interpolation", True), status="",
-        )
         frames_directory = os.path.splitext(output)[0] + "_interlaced_frames"
         os.makedirs(frames_directory, exist_ok=True)
         paths = []
@@ -113,14 +144,7 @@ def main():
     profile = config.get("profile", DEVICE_PROFILES[device])
     if "still_atlas_npy" in config:
         atlas = np.load(config["still_atlas_npy"], allow_pickle=False)
-        settings = SimpleNamespace(
-            device=device,
-            x0=config["x0"],
-            interval=config["interval"],
-            slope=config["slope"],
-            view_interpolation=config.get("view_interpolation", True),
-            status="",
-        )
+        settings = _calibration_settings(device, config)
         output = config["output"]
         tiled_path = atlas_path(output)
         save_atlas(atlas, tiled_path)
@@ -135,6 +159,7 @@ def main():
         int(config.get("view_height", VIEW_HEIGHT)), calibration,
         device=device, view_width=config.get("view_width"), profile=profile,
         interlaced_paths=config.get("interlaced_paths"),
+        atlas_npy_paths=config.get("atlas_npy_paths"),
     )
 
 

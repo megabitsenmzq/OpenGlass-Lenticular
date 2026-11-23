@@ -35,7 +35,7 @@ def active_progress_info():
     total_steps = getattr(_active, "total_steps", _active.total_views)
     label = getattr(_active, "progress_label", "")
     if label:
-        return total_steps, f"{total_steps}/{total_steps} {label}"
+        return total_steps, f"{_active.settings.cycles_progress}/{total_steps} {label}"
     return total_steps, f"{_active.settings.cycles_progress}/{total_steps} views"
 
 
@@ -426,10 +426,11 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
         self.region_3d.update()
         self.cached_camera_mode = self.region_3d.view_perspective == "CAMERA" and self.scene.camera is not None
         self.cached_view_location = self.region_3d.view_location.copy()
-        self.cached_poses = self._build_poses(self.region_3d)
+        self.cached_poses = None if (self.animation and self.cached_camera_mode) else self._build_poses(self.region_3d)
         self.completed_views = 0
         self.frame_position = 0
         self.atlas_paths = []
+        self.atlas_npy_paths = []
         self.interlaced_paths = []
         self.background_mode = None
         self._next_render_at = 0.0
@@ -497,24 +498,24 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
                     return {"RUNNING_MODAL"}
                 if self.animation and self.index == 0:
                     self.scene.frame_set(self.frames[self.frame_position])
-                    if self.cached_camera_mode:
+                    if self.cached_camera_mode and self.scene.camera is not None:
                         camera_region = SimpleNamespace(
                             view_perspective="CAMERA",
                             view_location=self.cached_view_location,
                         )
                         self.cached_poses = self._build_poses(camera_region)
+                    elif self.cached_poses is None:
+                        self.cached_poses = self._build_poses(self.region_3d)
                 self.render_current_view()
                 self._next_render_at = time.monotonic() + 0.01
                 return {"RUNNING_MODAL"}
             if self.animation:
+                npy_path = os.path.join(self.temp_dir.name, f"frame_{self.frame_position:06d}.npy")
+                np.save(npy_path, self.atlas_np, allow_pickle=False)
+                self.atlas_npy_paths.append(npy_path)
                 path = os.path.join(self.frames_directory, f"frame_{self.frame_position:06d}.png")
-                save_atlas(self.atlas_np, path)
                 self.atlas_paths.append(path)
                 comp_path = os.path.join(self.interlaced_frames_directory, f"frame_{self.frame_position:06d}.png")
-                save_composite(
-                    self.atlas_np, self.settings, comp_path,
-                    f"Lenticular_Interlaced_{self.frame_position:06d}", profile=self.profile,
-                )
                 self.interlaced_paths.append(comp_path)
                 self.frame_position += 1
                 if self.frame_position < len(self.frames):
@@ -522,6 +523,7 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
                     self.atlas_np.fill(0)
                     self._next_render_at = time.monotonic() + 0.01
                     return {"RUNNING_MODAL"}
+                self.atlas_np = None
                 self.start_encoding()
                 return {"RUNNING_MODAL"}
             self.start_still_save()
@@ -569,6 +571,7 @@ class LenticularOffscreenExportMixin(LenticularBaseExportMixin):
         with open(config_path, "w", encoding="utf-8") as handle:
             json.dump({
                 "atlas_paths": self.atlas_paths,
+                "atlas_npy_paths": self.atlas_npy_paths,
                 "interlaced_paths": self.interlaced_paths,
                 "output": self.filepath,
                 "fps": self.scene.render.fps,
